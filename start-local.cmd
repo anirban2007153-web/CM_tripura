@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-start "CleanMap Web" /D "%~dp0" "%ComSpec%" /k "npm.cmd run dev -- --host 127.0.0.1 --strictPort"
+start "CleanMap Web" /D "%~dp0" "%ComSpec%" /k "npm.cmd run dev -- --strictPort"
 
 endlocal
 
