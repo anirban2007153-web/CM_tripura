@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import bcrypt from 'bcryptjs';
 import Database from 'better-sqlite3';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
@@ -86,25 +85,24 @@ if (!complaintColumns.has('location_notes')) db.exec('ALTER TABLE complaints ADD
 
 const app = express();
 app.disable('x-powered-by');
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  strictTransportSecurity: { maxAge: 31536000 },
+}));
 app.use(express.json({ limit: '32kb' }));
 
 const clientOrigin = process.env.CLIENT_ORIGIN || 'http://localhost:3000';
-const cookieName = process.env.SESSION_COOKIE_NAME || 'cleanmap_session';
-const sessionHours = Math.max(1, Math.min(24, Number(process.env.SESSION_HOURS || 8)));
-const dummyPasswordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
-const cookieSecure = process.env.NODE_ENV === 'production';
-const sameSite = (process.env.SESSION_SAME_SITE || 'lax').toLowerCase();
-if (!['lax', 'strict', 'none'].includes(sameSite)) throw new Error('SESSION_SAME_SITE must be lax, strict, or none');
-if (sameSite === 'none' && !cookieSecure) throw new Error('SameSite=None requires NODE_ENV=production and HTTPS');
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+const supabasePublishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
+const trustedProxyHops = Number(process.env.TRUST_PROXY_HOPS || 0);
+if (Number.isInteger(trustedProxyHops) && trustedProxyHops > 0) app.set('trust proxy', trustedProxyHops);
 
 app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   if (req.headers.origin === clientOrigin) {
     res.setHeader('Access-Control-Allow-Origin', clientOrigin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   }
   if (req.method === 'OPTIONS') {
@@ -117,49 +115,61 @@ app.use((req, res, next) => {
 const rateLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false });
 app.use('/api', rateLimiter);
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'Too many sign-in attempts. Try again later.' } });
-const registrationLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false });
+const signupLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'Too many account creation attempts. Try again later.' } });
 const uploadLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false });
 
-const cookieOptions = { httpOnly: true, secure: cookieSecure, sameSite, path: '/', maxAge: sessionHours * 60 * 60 * 1000 };
-const parseCookies = (header = '') => Object.fromEntries(header.split(';').map((part) => part.trim().split(/=(.*)/s).slice(0, 2)).filter(([key, value]) => key && value !== undefined).map(([key, value]) => {
-  try { return [key, decodeURIComponent(value)]; } catch { return [key, '']; }
-}));
-const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
 const publicUser = (user) => ({ id: user.id, displayName: user.display_name, role: user.role });
-const getSessionUser = (req) => {
-  const token = parseCookies(req.headers.cookie)[cookieName];
-  if (!token) return null;
-  const record = db.prepare(`SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).get(sha256(token), Date.now());
-  if (!record) return null;
-  req.sessionTokenHash = sha256(token);
-  return record;
+const getSessionUser = async (req) => {
+  const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!token || !supabaseUrl || !supabasePublishableKey) return null;
+  const headers = { apikey: supabasePublishableKey, Authorization: `Bearer ${token}` };
+  const authResponse = await fetch(`${supabaseUrl}/auth/v1/user`, { headers, signal: AbortSignal.timeout(8000) });
+  if (!authResponse.ok) return null;
+  const authUser = await authResponse.json();
+  if (!authUser.id || !/^[0-9a-f-]{36}$/i.test(authUser.id)) return null;
+  const profileUrl = new URL('/rest/v1/profiles', supabaseUrl);
+  profileUrl.search = new URLSearchParams({ select: 'id,display_name,role,department,jurisdictions', id: `eq.${authUser.id}`, limit: '1' }).toString();
+  const profileResponse = await fetch(profileUrl, { headers, signal: AbortSignal.timeout(8000) });
+  if (!profileResponse.ok) throw new Error(`Supabase profile lookup failed (${profileResponse.status}).`);
+  const [profile] = await profileResponse.json();
+  if (!profile || !['citizen', 'authority'].includes(profile.role)) return null;
+  const user = {
+    id: authUser.id,
+    email: String(authUser.email || '').trim().toLowerCase(),
+    display_name: typeof profile.display_name === 'string' && profile.display_name.trim()
+      ? profile.display_name.trim()
+      : String(authUser.user_metadata?.display_name || authUser.email || 'User').slice(0, 100),
+    role: profile.role,
+    department: profile.department || null,
+    jurisdictions_json: JSON.stringify(Array.isArray(profile.jurisdictions) ? profile.jurisdictions : []),
+  };
+  db.prepare(`INSERT INTO users(id,email,display_name,password_hash,role,department,jurisdictions_json,created_at)
+    VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, display_name=excluded.display_name,
+    role=excluded.role, department=excluded.department, jurisdictions_json=excluded.jurisdictions_json`).run(
+    user.id, user.email, user.display_name, 'managed-by-supabase', user.role, user.department, user.jurisdictions_json, now()
+  );
+  return user;
 };
-const requireAuth = (role) => (req, res, next) => {
-  const user = getSessionUser(req);
-  if (!user) return res.status(401).json({ message: 'Sign in to continue.' });
-  if (role && user.role !== role) return res.status(403).json({ message: 'You do not have access to this operation.' });
-  req.user = user;
-  next();
+const requireAuth = (role) => async (req, res, next) => {
+  try {
+    const user = await getSessionUser(req);
+    if (!user) return res.status(401).json({ message: 'Sign in to continue.' });
+    if (role && user.role !== role) return res.status(403).json({ message: 'You do not have access to this operation.' });
+    req.user = user;
+    next();
+  } catch (error) {
+    console.error('Supabase authentication could not be verified:', error?.message || 'unknown error');
+    return res.status(503).json({ message: 'Authentication could not be verified. Please try again.' });
+  }
 };
 const requireTrustedOrigin = (req, res, next) => {
   if (req.headers.origin !== clientOrigin) return res.status(403).json({ message: 'Request origin was not accepted.' });
   next();
 };
 const roleMiddleware = (role) => [requireTrustedOrigin, requireAuth(role)];
-const createSession = (res, userId) => {
-  const token = crypto.randomBytes(32).toString('base64url');
-  db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)')
-    .run(sha256(token), userId, Date.now() + cookieOptions.maxAge, now());
-  res.cookie(cookieName, token, cookieOptions);
-};
-const revokeCurrentSession = (req) => {
-  const oldToken = parseCookies(req.headers.cookie)[cookieName];
-  if (oldToken) db.prepare('DELETE FROM sessions WHERE token_hash=?').run(sha256(oldToken));
-};
-const cleanExpiredSessions = () => db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
-const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 const validText = (value, max) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max;
+const validEmail = (value) => typeof value === 'string' && value.trim().length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 const displayDate = (iso) => new Date(iso).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' });
 const transitions = {
   Submitted: ['Under Review', 'Rejected'],
@@ -252,51 +262,52 @@ function validateImage(file) {
   return isJpeg ? 'image/jpeg' : isPng ? 'image/png' : 'image/webp';
 }
 
-app.post('/api/auth/register', registrationLimiter, requireTrustedOrigin, async (req, res, next) => {
+async function proxySupabaseAuth(res, action, payload, successStatus, redirectTo) {
+  if (!supabaseUrl || !supabasePublishableKey) return res.status(503).json({ message: 'Authentication is not configured.' });
+  const upstreamUrl = new URL(action === 'login' ? 'auth/v1/token?grant_type=password' : 'auth/v1/signup', `${supabaseUrl.replace(/\/$/, '')}/`);
+  if (redirectTo) upstreamUrl.searchParams.set('redirect_to', redirectTo);
   try {
-    const { displayName, email, password } = req.body || {};
-    if (!validText(displayName, 100) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '')) || typeof password !== 'string' || password.length < 12 || password.length > 200) {
-      return res.status(400).json({ message: 'Enter a name, valid email address, and password of at least 12 characters.' });
+    const upstream = await fetch(upstreamUrl, {
+      method: 'POST',
+      headers: { apikey: supabasePublishableKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!upstream.ok) {
+      return res.status(action === 'login' ? 401 : 400).json({
+        message: action === 'login' ? 'Email or password was not accepted.' : 'Could not create the account. Check the details or sign in.',
+      });
     }
-    const id = crypto.randomUUID();
-    const hash = await bcrypt.hash(password, 12);
-    db.prepare('INSERT INTO users(id,email,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)')
-      .run(id, normalizeEmail(email), displayName.trim(), hash, 'citizen', now());
-    revokeCurrentSession(req);
-    createSession(res, id);
-    return res.status(201).json({ user: { id, displayName: displayName.trim(), role: 'citizen' } });
+    const result = await upstream.json();
+    return res.status(successStatus).json(result);
   } catch (error) {
-    if (String(error.code) === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ message: 'An account with that email address already exists.' });
-    return next(error);
+    console.error('Supabase Auth request failed:', error?.name || 'unknown error');
+    return res.status(503).json({ message: 'Authentication is temporarily unavailable.' });
   }
+}
+
+app.post('/api/auth/login', loginLimiter, requireTrustedOrigin, (req, res) => {
+  const { email, password } = req.body || {};
+  if (!validEmail(email) || typeof password !== 'string' || password.length < 1 || password.length > 1024) {
+    return res.status(400).json({ message: 'Enter a valid email address and password.' });
+  }
+  return proxySupabaseAuth(res, 'login', { email: email.trim().toLowerCase(), password }, 200);
 });
 
-app.post('/api/auth/login', loginLimiter, requireTrustedOrigin, async (req, res, next) => {
-  try {
-    const email = normalizeEmail(req.body?.email);
-    const password = req.body?.password;
-    const user = db.prepare('SELECT * FROM users WHERE email=?').get(email);
-    const acceptedPassword = typeof password === 'string' && await bcrypt.compare(password, user?.password_hash || dummyPasswordHash);
-    const accepted = user && acceptedPassword;
-    if (!accepted || (req.body?.expectedRole && req.body.expectedRole !== user.role)) return res.status(401).json({ message: 'Email or password was not accepted.' });
-    cleanExpiredSessions();
-    revokeCurrentSession(req);
-    createSession(res, user.id);
-    return res.json({ user: publicUser(user) });
-  } catch (error) { return next(error); }
+app.post('/api/auth/register', requireTrustedOrigin, signupLimiter, (req, res) => {
+  const { displayName, email, password } = req.body || {};
+  if (!validText(displayName, 100) || !validEmail(email) || typeof password !== 'string' || password.length < 12 || password.length > 200) {
+    return res.status(400).json({ message: 'Enter a name, valid email address, and password of at least 12 characters.' });
+  }
+  const redirectTo = `${clientOrigin.replace(/\/$/, '')}/citizen/login`;
+  return proxySupabaseAuth(res, 'register', {
+    email: email.trim().toLowerCase(),
+    password,
+    data: { display_name: displayName.trim() },
+  }, 201, redirectTo);
 });
 
-app.get('/api/auth/session', (req, res) => {
-  const user = getSessionUser(req);
-  if (!user) return res.status(401).json({ message: 'Sign in to continue.' });
-  return res.json({ user: publicUser(user) });
-});
-
-app.post('/api/auth/logout', ...roleMiddleware(), (req, res) => {
-  db.prepare('DELETE FROM sessions WHERE token_hash=?').run(req.sessionTokenHash);
-  res.clearCookie(cookieName, { ...cookieOptions, maxAge: undefined });
-  return res.sendStatus(204);
-});
+app.get('/api/auth/session', ...roleMiddleware(), (req, res) => res.json({ user: publicUser(req.user) }));
 
 app.get('/api/citizen/complaints', ...roleMiddleware('citizen'), (req, res) => {
   const rows = db.prepare('SELECT * FROM complaints WHERE owner_id=? ORDER BY created_at DESC').all(req.user.id);
@@ -436,5 +447,11 @@ app.use((error, _req, res, _next) => {
 });
 
 const port = Number(process.env.PORT || 3001);
-if (process.env.NODE_ENV === 'production' && !process.env.CLIENT_ORIGIN) throw new Error('Set CLIENT_ORIGIN to the exact HTTPS origin of the web client in production.');
-app.listen(port, () => console.log(`CleanMap API listening on port ${port}; database: ${dbPath}`));
+if (process.env.NODE_ENV === 'production') {
+  if (!process.env.CLIENT_ORIGIN) throw new Error('Set CLIENT_ORIGIN to the exact HTTPS origin of the web client in production.');
+  if (new URL(process.env.CLIENT_ORIGIN).protocol !== 'https:') throw new Error('CLIENT_ORIGIN must use HTTPS in production.');
+  if (!supabaseUrl.startsWith('https://') || !supabasePublishableKey) throw new Error('Set the HTTPS Supabase URL and publishable key in production.');
+  if (trustedProxyHops < 0 || !Number.isInteger(trustedProxyHops)) throw new Error('TRUST_PROXY_HOPS must be a non-negative integer.');
+}
+app.listen(port, () => console.log(`CleanMap API listening on port ${port}.`));
+
