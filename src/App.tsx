@@ -3,17 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, Suspense } from 'react';
 import { Screen, ReportItem, TransitionDirection, SelectedLocation, AuthSession } from './types';
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
 import { CookieModal } from './components/CookieModal';
 import { InfoModal } from './components/InfoModal';
-import { HomeScreen } from './screens/HomeScreen';
-import { ReportScreen } from './screens/ReportScreen';
-import { TrackScreen } from './screens/TrackScreen';
-import { LoginScreen } from './screens/LoginScreen';
-import { AccessDenied, AuthorityDashboard, CitizenDashboard } from './screens/PortalScreens';
+const HomeScreen = React.lazy(() => import('./screens/HomeScreen').then((module) => ({ default: module.HomeScreen })));
+const ReportScreen = React.lazy(() => import('./screens/ReportScreen').then((module) => ({ default: module.ReportScreen })));
+const TrackScreen = React.lazy(() => import('./screens/TrackScreen').then((module) => ({ default: module.TrackScreen })));
+const AccessDenied = React.lazy(() => import('./screens/PortalScreens').then((module) => ({ default: module.AccessDenied })));
+const AuthorityDashboard = React.lazy(() => import('./screens/PortalScreens').then((module) => ({ default: module.AuthorityDashboard })));
+const CitizenDashboard = React.lazy(() => import('./screens/PortalScreens').then((module) => ({ default: module.CitizenDashboard })));
 import { cleanMapApi, isApiConfigured } from './utils/api';
 
 function getScreenFromPath(pathname: string, hash: string): Screen {
@@ -21,10 +22,10 @@ function getScreenFromPath(pathname: string, hash: string): Screen {
   const cleanHash = hash.replace('#', '').toLowerCase();
 
   if (cleanPath.startsWith('/authority') || cleanHash.startsWith('authority-')) {
-    return cleanPath.includes('dashboard') || cleanHash === 'authority-dashboard' ? 'authority-dashboard' : 'authority-login';
+    return cleanPath.includes('dashboard') || cleanHash === 'authority-dashboard' ? 'authority-dashboard' : 'home';
   }
   if (cleanPath.startsWith('/citizen') || cleanHash.startsWith('citizen-')) {
-    return cleanPath.includes('dashboard') || cleanHash === 'citizen-dashboard' ? 'citizen-dashboard' : 'citizen-login';
+    return cleanPath.includes('dashboard') || cleanHash === 'citizen-dashboard' ? 'citizen-dashboard' : 'home';
   }
 
   if (cleanPath.includes('report-a-problem') || cleanHash === 'report-a-problem') {
@@ -36,16 +37,16 @@ function getScreenFromPath(pathname: string, hash: string): Screen {
   if (cleanPath === '/home' || cleanHash === 'home') {
     return 'home';
   }
-  return 'citizen-login';
+  return 'home';
 }
 
 function getPathForScreen(screen: Screen): string {
   switch (screen) {
     case 'login':
     case 'citizen-login':
-      return '/citizen/login';
+      return '/';
     case 'authority-login':
-      return '/authority/login';
+      return '/';
     case 'citizen-dashboard':
       return '/citizen/dashboard';
     case 'authority-dashboard':
@@ -59,7 +60,7 @@ function getPathForScreen(screen: Screen): string {
     case 'home':
       return '/home';
     default:
-      return '/citizen/login';
+      return '/';
   }
 }
 
@@ -138,7 +139,7 @@ export default function App() {
     [activeReportId]
   );
 
-  // Restore only a trusted server session; browser state never determines a user's role.
+  // Restore the Supabase identity through the API; browser state never determines a user's role.
   useEffect(() => {
     let isMounted = true;
     async function restoreSession() {
@@ -233,7 +234,7 @@ export default function App() {
       setSession(null);
       setReports([]);
       setAuthStatus('unauthenticated');
-      navigateTo('citizen-login', 'back');
+      navigateTo('home', 'back');
     } catch (error) {
       setSignOutError(error instanceof Error ? `Sign-out could not be confirmed: ${error.message}` : 'Sign-out could not be confirmed. Please try again.');
     }
@@ -243,7 +244,7 @@ export default function App() {
     setInfoModal({ title, content });
   }, []);
 
-  const citizenOnly = ['citizen-dashboard', 'home', 'report-a-problem', 'track-a-report'].includes(currentScreen);
+  const citizenOnly = ['citizen-dashboard', 'report-a-problem', 'track-a-report'].includes(currentScreen);
   const authorityOnly = currentScreen === 'authority-dashboard';
   const needsSession = citizenOnly || authorityOnly;
   const roleMismatch = Boolean(session && ((citizenOnly && session.user.role !== 'citizen') || (authorityOnly && session.user.role !== 'authority')));
@@ -267,17 +268,13 @@ export default function App() {
             : 'animate-in fade-in slide-in-from-left-4'
         }`}
       >
-        {currentScreen === 'login' && <LoginScreen role="citizen" onNavigate={navigateTo} onAuthenticated={completeSignIn} />}
-        {(currentScreen === 'citizen-login' || currentScreen === 'authority-login') && (
-          <LoginScreen role={currentScreen === 'authority-login' ? 'authority' : 'citizen'} onNavigate={navigateTo} onAuthenticated={completeSignIn} />
-        )}
-
+        <Suspense fallback={<main className="flex min-h-[55vh] items-center justify-center bg-surface px-4" aria-live="polite">Loading page…</main>}>
         {needsSession && authStatus === 'loading' && (
           <main className="flex min-h-[55vh] items-center justify-center bg-surface px-4" aria-live="polite">Checking your secure session…</main>
         )}
         {needsSession && authStatus !== 'loading' && (!session || roleMismatch) && (
           <AccessDenied
-            message={roleMismatch ? 'Your account does not have permission to open this portal.' : authStatus === 'unavailable' ? 'The trusted authentication service is not configured or is unavailable. Protected complaint data remains closed.' : 'Please sign in to continue.'}
+            message={roleMismatch ? 'Your account does not have permission to open this portal.' : authStatus === 'unavailable' ? 'The trusted authentication service is not configured or is unavailable. Protected complaint data remains closed.' : 'This area requires an authenticated account. Sign-in is unavailable in this public preview.'}
             onNavigate={navigateTo}
           />
         )}
@@ -298,11 +295,11 @@ export default function App() {
           />
         )}
 
-        {currentScreen === 'home' && session?.user.role === 'citizen' && (
+        {currentScreen === 'home' && (
           <HomeScreen
             onNavigate={navigateTo}
             onOpenInfoModal={openInfoModal}
-            reports={reports}
+            reports={[]}
           />
         )}
 
@@ -323,6 +320,7 @@ export default function App() {
             reports={reports}
           />
         )}
+        </Suspense>
       </div>
 
       {/* Footer */}
@@ -349,3 +347,4 @@ export default function App() {
     </div>
   );
 }
+
