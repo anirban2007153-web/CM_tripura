@@ -1,9 +1,13 @@
 import { AuthSession, ReportItem, UserRole } from '../types';
+import { isSupabaseConfigured, supabaseAuth } from './supabaseAuth';
 
 const API_BASE_URL = import.meta.env.VITE_CLEANMAP_API_URL?.trim().replace(/\/$/, '') || '';
 
 // In development, Vite proxies /api to the local Express service.
-export const isApiConfigured = Boolean(API_BASE_URL) || import.meta.env.DEV;
+export const isApiConfigured = isSupabaseConfigured;
+if (import.meta.env.PROD && API_BASE_URL && !API_BASE_URL.startsWith('https://')) {
+  throw new Error('VITE_CLEANMAP_API_URL must use HTTPS in production.');
+}
 
 export class ApiError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -18,18 +22,20 @@ function withEvidenceUrl(report: ReportItem): ReportItem {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  if (!API_BASE_URL) {
-    throw new Error('CleanMap authentication and complaint services are not configured.');
+  if (!isApiConfigured) {
+    throw new Error('Supabase Auth and the CleanMap API are not configured.');
   }
 
   const headers = new Headers(init.headers);
+  const accessToken = await supabaseAuth.getAccessToken();
+  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     cache: 'no-store',
-    credentials: 'include',
+    credentials: 'omit',
     headers,
   });
 
@@ -49,18 +55,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const cleanMapApi = {
-  signIn(email: string, password: string, expectedRole: UserRole) {
-    return request<AuthSession>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password, expectedRole }),
-    });
+  async signIn(email: string, password: string, expectedRole: UserRole) {
+    await supabaseAuth.signIn(email, password);
+    try {
+      const session = await this.getSession();
+      if (session.user.role !== expectedRole) throw new ApiError('This account does not have access to this portal.', 403);
+      return session;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) await supabaseAuth.signOut();
+      throw error;
+    }
   },
 
-  registerCitizen(displayName: string, email: string, password: string) {
-    return request<AuthSession>('/api/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ displayName, email, password }),
-    });
+  async registerCitizen(displayName: string, email: string, password: string) {
+    const hasSession = await supabaseAuth.signUp(displayName, email, password);
+    return hasSession ? this.getSession() : null;
   },
 
   getSession() {
@@ -68,7 +77,7 @@ export const cleanMapApi = {
   },
 
   signOut() {
-    return request<void>('/api/auth/logout', { method: 'POST' });
+    return supabaseAuth.signOut();
   },
 
   getCitizenComplaints() {
@@ -106,3 +115,4 @@ export const cleanMapApi = {
     }).then(withEvidenceUrl);
   },
 };
+
