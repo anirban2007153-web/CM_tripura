@@ -263,11 +263,11 @@ export function AccessDenied({ message, onNavigate }: { message: string; onNavig
         <span aria-hidden="true" className="material-symbols-outlined text-4xl text-error">lock</span>
         <h1 className="mt-3 text-2xl font-bold text-on-surface">Access unavailable</h1>
         <p className="mt-2 text-sm leading-6 text-on-surface-variant">{message}</p>
-        <div className="mt-6 flex flex-wrap justify-center gap-3">
-          <button className="min-h-11 rounded-lg bg-primary px-4 font-bold text-on-primary hover:bg-primary-container" onClick={() => onNavigate('citizen-login')} type="button">Citizen sign in</button>
-          <button className="min-h-11 rounded-lg border border-outline-variant px-4 font-bold text-on-surface hover:bg-surface-container-low" onClick={() => onNavigate('authority-login')} type="button">Authority sign in</button>
+        <div className="mt-6 flex justify-center">
+          <button className="min-h-11 rounded-lg bg-primary px-4 font-bold text-on-primary hover:bg-primary-container" onClick={() => onNavigate('home')} type="button">Return to home</button>
         </div>
       </section>
     </main>
   );
 }
+
