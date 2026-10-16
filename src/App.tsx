@@ -1,349 +1,103 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import { ArrowDown, ArrowUpRight, Leaf, MapPin, Sprout } from 'lucide-react';
 
-import React, { useState, useEffect, useCallback, Suspense } from 'react';
-import { Screen, ReportItem, TransitionDirection, SelectedLocation, AuthSession } from './types';
-import { Header } from './components/Header';
-import { Footer } from './components/Footer';
-import { CookieModal } from './components/CookieModal';
-import { InfoModal } from './components/InfoModal';
-const HomeScreen = React.lazy(() => import('./screens/HomeScreen').then((module) => ({ default: module.HomeScreen })));
-const ReportScreen = React.lazy(() => import('./screens/ReportScreen').then((module) => ({ default: module.ReportScreen })));
-const TrackScreen = React.lazy(() => import('./screens/TrackScreen').then((module) => ({ default: module.TrackScreen })));
-const AccessDenied = React.lazy(() => import('./screens/PortalScreens').then((module) => ({ default: module.AccessDenied })));
-const AuthorityDashboard = React.lazy(() => import('./screens/PortalScreens').then((module) => ({ default: module.AuthorityDashboard })));
-const CitizenDashboard = React.lazy(() => import('./screens/PortalScreens').then((module) => ({ default: module.CitizenDashboard })));
-import { cleanMapApi, isApiConfigured } from './utils/api';
+const ideas = [
+  {
+    number: '01',
+    title: 'Notice what is happening',
+    description: 'Make it easier for neighbors to describe a cleanliness concern and where it is happening.',
+    icon: MapPin,
+  },
+  {
+    number: '02',
+    title: 'Understand the bigger picture',
+    description: 'Bring local observations together so recurring patterns are easier to see.',
+    icon: Sprout,
+  },
+  {
+    number: '03',
+    title: 'See how places change',
+    description: 'Keep a clear record of updates and community progress over time.',
+    icon: Leaf,
+  },
+];
 
-function getScreenFromPath(pathname: string, hash: string): Screen {
-  const cleanPath = pathname.toLowerCase();
-  const cleanHash = hash.replace('#', '').toLowerCase();
-
-  if (cleanPath.startsWith('/authority') || cleanHash.startsWith('authority-')) {
-    return cleanPath.includes('dashboard') || cleanHash === 'authority-dashboard' ? 'authority-dashboard' : 'home';
-  }
-  if (cleanPath.startsWith('/citizen') || cleanHash.startsWith('citizen-')) {
-    return cleanPath.includes('dashboard') || cleanHash === 'citizen-dashboard' ? 'citizen-dashboard' : 'home';
-  }
-
-  if (cleanPath.includes('report-a-problem') || cleanHash === 'report-a-problem') {
-    return 'report-a-problem';
-  }
-  if (cleanPath.includes('track-a-report') || cleanHash === 'track-a-report') {
-    return 'track-a-report';
-  }
-  if (cleanPath === '/home' || cleanHash === 'home') {
-    return 'home';
-  }
-  return 'home';
-}
-
-function getPathForScreen(screen: Screen): string {
-  switch (screen) {
-    case 'login':
-    case 'citizen-login':
-      return '/';
-    case 'authority-login':
-      return '/';
-    case 'citizen-dashboard':
-      return '/citizen/dashboard';
-    case 'authority-dashboard':
-      return '/authority/dashboard';
-    case 'access-denied':
-      return '/access-denied';
-    case 'report-a-problem':
-      return '/report-a-problem';
-    case 'track-a-report':
-      return '/track-a-report';
-    case 'home':
-      return '/home';
-    default:
-      return '/';
-  }
+function MapIllustration() {
+  return (
+    <div aria-label="Illustration of a neighborhood map with location markers" className="map-card" role="img">
+      <div className="map-toolbar"><span className="map-dot" /><span>TRIPURA · COMMUNITY VIEW</span><span className="map-menu">•••</span></div>
+      <div className="map-canvas">
+        <span className="map-label map-label-one">AGARTALA</span>
+        <span className="map-label map-label-two">NEIGHBORHOOD</span>
+        <span className="map-road map-road-one" />
+        <span className="map-road map-road-two" />
+        <span className="map-road map-road-three" />
+        <span className="map-green map-green-one" />
+        <span className="map-green map-green-two" />
+        <span className="map-pin map-pin-one"><MapPin size={18} strokeWidth={2.5} /></span>
+        <span className="map-pin map-pin-two"><MapPin size={18} strokeWidth={2.5} /></span>
+        <span className="map-pin map-pin-three"><MapPin size={18} strokeWidth={2.5} /></span>
+      </div>
+      <div className="map-caption"><span className="caption-icon"><Leaf size={16} /></span><span><strong>A clearer local picture</strong><small>An idea for seeing what matters, street by street.</small></span><ArrowUpRight aria-hidden="true" className="caption-arrow" size={18} /></div>
+    </div>
+  );
 }
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<Screen>(() => {
-    return getScreenFromPath(window.location.pathname, window.location.hash);
-  });
-  const [transitionDirection, setTransitionDirection] = useState<TransitionDirection>('forward');
-  const [reports, setReports] = useState<ReportItem[]>([]);
-  const [session, setSession] = useState<AuthSession | null>(null);
-  const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unauthenticated' | 'unavailable'>('loading');
-  const [reportsLoading, setReportsLoading] = useState(false);
-  const [reportsError, setReportsError] = useState<string | null>(null);
-  const [signOutError, setSignOutError] = useState<string | null>(null);
-  const [authorityFilters, setAuthorityFilters] = useState<URLSearchParams>(new URLSearchParams());
-  const [activeReportId, setActiveReportId] = useState<string>(() =>
-    new URLSearchParams(window.location.search).get('ref') || ''
-  );
-  const [prefilledLocation, setPrefilledLocation] = useState<SelectedLocation | null>(null);
-
-  // Modals
-  const [cookieModalOpen, setCookieModalOpen] = useState<boolean>(false);
-  const [showCookieBanner, setShowCookieBanner] = useState<boolean>(true);
-  const [infoModal, setInfoModal] = useState<{ title: string; content: string } | null>(null);
-
-  // Sync with browser back / forward navigation
-  useEffect(() => {
-    const syncLocation = () => {
-      const targetScreen = getScreenFromPath(window.location.pathname, window.location.hash);
-      const urlParams = new URLSearchParams(window.location.search);
-      const refFromUrl = urlParams.get('ref');
-      setActiveReportId(refFromUrl || '');
-      setTransitionDirection('back');
-      setCurrentScreen(targetScreen);
-    };
-
-    window.addEventListener('popstate', syncLocation);
-    window.addEventListener('hashchange', syncLocation);
-    return () => {
-      window.removeEventListener('popstate', syncLocation);
-      window.removeEventListener('hashchange', syncLocation);
-    };
-  }, []);
-
-  const navigateTo = useCallback(
-    (
-      screen: Screen,
-      direction: TransitionDirection = 'forward',
-      reportId?: string,
-      location?: SelectedLocation
-    ) => {
-      setTransitionDirection(direction);
-      if (reportId) {
-        setActiveReportId(reportId);
-      }
-      if (location) {
-        setPrefilledLocation(location);
-      }
-
-      const targetPath = getPathForScreen(screen);
-      const trackedReportId = reportId || (screen === 'track-a-report' ? activeReportId : undefined);
-      const searchParam = trackedReportId ? `?ref=${encodeURIComponent(trackedReportId)}` : '';
-      const fullUrl = `${targetPath}${searchParam}`;
-
-      // Update browser history
-      try {
-        window.history.pushState({ screen, reportId: trackedReportId }, '', fullUrl);
-      } catch {
-        // Fallback for sandboxed iframes
-        window.location.hash = screen;
-      }
-
-      setCurrentScreen(screen);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    },
-    [activeReportId]
-  );
-
-  // Restore the Supabase identity through the API; browser state never determines a user's role.
-  useEffect(() => {
-    let isMounted = true;
-    async function restoreSession() {
-      if (!isApiConfigured) {
-        setAuthStatus('unavailable');
-        return;
-      }
-      try {
-        const restored = await cleanMapApi.getSession();
-        if (isMounted) {
-          setSession(restored);
-          setAuthStatus('authenticated');
-        }
-      } catch (err) {
-        if (!isMounted) return;
-        if (err instanceof Error && 'status' in err && (err as { status?: number }).status === 401) {
-          setAuthStatus('unauthenticated');
-        } else {
-          setAuthStatus('unavailable');
-        }
-      }
-    }
-    restoreSession();
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  // The backend applies citizen ownership and authority jurisdiction filters.
-  useEffect(() => {
-    if (!session) {
-      setReports([]);
-      return;
-    }
-    let isMounted = true;
-    setReportsLoading(true);
-    setReportsError(null);
-    const load = session.user.role === 'citizen'
-      ? cleanMapApi.getCitizenComplaints()
-      : cleanMapApi.getAuthorityComplaints(authorityFilters);
-    load.then((items) => {
-      if (isMounted) setReports(items);
-    }).catch((error) => {
-      if (!isMounted) return;
-      setReports([]);
-      setReportsError(error instanceof Error ? error.message : 'Could not load complaints.');
-      if (error instanceof Error && 'status' in error && (error as { status?: number }).status === 401) {
-        setSession(null);
-        setAuthStatus('unauthenticated');
-      }
-    }).finally(() => {
-      if (isMounted) setReportsLoading(false);
-    });
-    return () => { isMounted = false; };
-  }, [session, authorityFilters]);
-
-  const handleAddReport = useCallback(
-    async (newReport: ReportItem, imageFile?: File | Blob | null) => {
-      const formData = new FormData();
-      formData.append('complaint', JSON.stringify({
-        category: newReport.category,
-        description: newReport.siteAssessment,
-        location: newReport.location,
-        ward: newReport.ward,
-        latitude: newReport.lat,
-        longitude: newReport.lng,
-        severity: newReport.severity,
-        locationNotes: newReport.locationNotes,
-      }));
-      if (imageFile) formData.append('evidence', imageFile, 'evidence-upload');
-      const created = await cleanMapApi.createComplaint(formData);
-      setReports((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
-      setActiveReportId(created.id);
-      return created;
-    },
-    []
-  );
-
-  const completeSignIn = useCallback((newSession: AuthSession) => {
-    setSession(newSession);
-    setReports([]);
-    setAuthStatus('authenticated');
-    const target: Screen = newSession.user.role === 'authority' ? 'authority-dashboard' : 'citizen-dashboard';
-    setCurrentScreen(target);
-    window.history.replaceState({ screen: target }, '', getPathForScreen(target));
-  }, []);
-
-  const signOut = useCallback(async () => {
-    try {
-      await cleanMapApi.signOut();
-      setSignOutError(null);
-      setSession(null);
-      setReports([]);
-      setAuthStatus('unauthenticated');
-      navigateTo('home', 'back');
-    } catch (error) {
-      setSignOutError(error instanceof Error ? `Sign-out could not be confirmed: ${error.message}` : 'Sign-out could not be confirmed. Please try again.');
-    }
-  }, [navigateTo]);
-
-  const openInfoModal = useCallback((title: string, content: string) => {
-    setInfoModal({ title, content });
-  }, []);
-
-  const citizenOnly = ['citizen-dashboard', 'report-a-problem', 'track-a-report'].includes(currentScreen);
-  const authorityOnly = currentScreen === 'authority-dashboard';
-  const needsSession = citizenOnly || authorityOnly;
-  const roleMismatch = Boolean(session && ((citizenOnly && session.user.role !== 'citizen') || (authorityOnly && session.user.role !== 'authority')));
-
   return (
-    <div className="min-h-screen flex flex-col bg-surface text-on-surface font-body-md text-body-md overflow-x-hidden selection:bg-secondary-container selection:text-on-secondary-container">
-      {/* Header */}
-      <Header
-        currentScreen={currentScreen}
-        onNavigate={navigateTo}
-        onOpenCookieModal={() => setCookieModalOpen(true)}
-        onOpenInfoModal={openInfoModal}
-      />
+    <div className="site-shell">
+      <header className="site-header">
+        <a aria-label="CleanMap Tripura home" className="brand" href="#top">
+          <span className="brand-mark"><Leaf aria-hidden="true" size={19} strokeWidth={2.2} /></span>
+          <span>cleanmap<span className="brand-place">tripura</span></span>
+        </a>
+        <nav aria-label="Main navigation" className="desktop-nav">
+          <a href="#idea">The idea</a>
+          <a href="#how-it-works">How it could work</a>
+          <a className="nav-cta" href="#how-it-works">Explore the idea <ArrowUpRight aria-hidden="true" size={15} /></a>
+        </nav>
+        <a aria-label="Explore how CleanMap could work" className="mobile-cta" href="#how-it-works"><ArrowUpRight size={18} /></a>
+      </header>
 
-      {/* Screen Container with directional push/push_back animation class */}
-      <div
-        key={currentScreen}
-        className={`flex-1 w-full transition-all duration-300 ${
-          transitionDirection === 'forward'
-            ? 'animate-in fade-in slide-in-from-right-4'
-            : 'animate-in fade-in slide-in-from-left-4'
-        }`}
-      >
-        <Suspense fallback={<main className="flex min-h-[55vh] items-center justify-center bg-surface px-4" aria-live="polite">Loading page…</main>}>
-        {needsSession && authStatus === 'loading' && (
-          <main className="flex min-h-[55vh] items-center justify-center bg-surface px-4" aria-live="polite">Checking your secure session…</main>
-        )}
-        {needsSession && authStatus !== 'loading' && (!session || roleMismatch) && (
-          <AccessDenied
-            message={roleMismatch ? 'Your account does not have permission to open this portal.' : authStatus === 'unavailable' ? 'The trusted authentication service is not configured or is unavailable. Protected complaint data remains closed.' : 'This area requires an authenticated account. Sign-in is unavailable in this public preview.'}
-            onNavigate={navigateTo}
-          />
-        )}
+      <main id="top">
+        <section aria-labelledby="hero-title" className="hero section-wrap">
+          <div className="hero-copy">
+            <p className="eyebrow"><span className="eyebrow-line" />A community idea for Tripura</p>
+            <h1 id="hero-title">Cleaner streets start with a <span>clearer picture.</span></h1>
+            <p className="hero-description">CleanMap is a simple idea: help communities notice local cleanliness concerns, understand where they happen, and see how places change over time.</p>
+            <a className="primary-cta" href="#how-it-works">See how it could work <ArrowUpRight aria-hidden="true" size={17} /></a>
+            <a className="scroll-cue" href="#idea"><span>Scroll to explore</span><ArrowDown aria-hidden="true" size={15} /></a>
+          </div>
+          <div className="hero-visual"><div aria-hidden="true" className="visual-orbit orbit-one" /><div aria-hidden="true" className="visual-orbit orbit-two" /><MapIllustration /><span className="visual-note">SMALL OBSERVATIONS. SHARED UNDERSTANDING.</span></div>
+        </section>
 
-        {currentScreen === 'citizen-dashboard' && session?.user.role === 'citizen' && (
-          <CitizenDashboard user={session.user} reports={reports} loading={reportsLoading} loadError={reportsError} onNavigate={navigateTo} onSignOut={signOut} signOutError={signOutError} />
-        )}
-        {currentScreen === 'authority-dashboard' && session?.user.role === 'authority' && (
-          <AuthorityDashboard
-            user={session.user}
-            reports={reports}
-            loading={reportsLoading}
-            loadError={reportsError}
-            onNavigate={navigateTo}
-            onSignOut={signOut}
-            signOutError={signOutError}
-            onFilterChange={setAuthorityFilters}
-          />
-        )}
+        <section aria-labelledby="idea-title" className="idea-section section-wrap" id="idea">
+          <div className="section-heading">
+            <p className="eyebrow"><span className="eyebrow-line" />The idea</p>
+            <h2 id="idea-title">A better view of the places we share.</h2>
+          </div>
+          <p className="idea-intro">CleanMap imagines a thoughtful, neighborhood-level way to share what people see around them. The goal is to make local information easier to understand and act on together.</p>
+        </section>
 
-        {currentScreen === 'home' && (
-          <HomeScreen
-            onNavigate={navigateTo}
-            onOpenInfoModal={openInfoModal}
-            reports={[]}
-          />
-        )}
+        <section aria-labelledby="steps-title" className="steps-section section-wrap" id="how-it-works">
+          <div className="steps-heading"><div><p className="eyebrow"><span className="eyebrow-line" />A simple starting point</p><h2 id="steps-title">How it could work</h2></div><p>Three small steps toward a clearer community picture.</p></div>
+          <div className="idea-grid">
+            {ideas.map(({ number, title, description, icon: Icon }) => (
+              <article className="idea-card" key={number}>
+                <div className="card-top"><span className="card-number">{number}</span><span className="card-icon"><Icon aria-hidden="true" size={20} strokeWidth={1.8} /></span></div>
+                <h3>{title}</h3>
+                <p>{description}</p>
+                <span aria-hidden="true" className="card-rule" />
+              </article>
+            ))}
+          </div>
+        </section>
 
-        {currentScreen === 'report-a-problem' && session?.user.role === 'citizen' && (
-          <ReportScreen
-            onAddReport={handleAddReport}
-            onNavigate={navigateTo}
-            onOpenInfoModal={openInfoModal}
-            prefilledLocation={prefilledLocation}
-          />
-        )}
+        <section aria-labelledby="closing-title" className="closing-section section-wrap">
+          <div className="closing-panel"><span aria-hidden="true" className="closing-mark"><Leaf size={21} /></span><div><p className="eyebrow">A cleaner future, together</p><h2 id="closing-title">Good ideas begin with paying attention.</h2></div><a aria-label="Back to top" className="closing-link" href="#top"><ArrowUpRight size={20} /></a></div>
+        </section>
+      </main>
 
-        {currentScreen === 'track-a-report' && session?.user.role === 'citizen' && (
-          <TrackScreen
-            activeReportId={activeReportId}
-            onNavigate={navigateTo}
-            onOpenInfoModal={openInfoModal}
-            reports={reports}
-          />
-        )}
-        </Suspense>
-      </div>
-
-      {/* Footer */}
-      <Footer
-        currentScreen={currentScreen}
-        onNavigate={navigateTo}
-        onOpenInfoModal={openInfoModal}
-      />
-
-      {/* Cookie Banner & Preferences Modal */}
-      <CookieModal
-        isOpen={cookieModalOpen}
-        onClose={() => setCookieModalOpen(false)}
-        onDismissBanner={() => setShowCookieBanner(false)}
-        showBanner={showCookieBanner}
-      />
-
-      {/* Auxiliary Information Modal */}
-      <InfoModal
-        content={infoModal?.content || null}
-        onClose={() => setInfoModal(null)}
-        title={infoModal?.title || null}
-      />
+      <footer className="site-footer section-wrap"><a aria-label="CleanMap Tripura home" className="brand footer-brand" href="#top"><span className="brand-mark"><Leaf aria-hidden="true" size={17} /></span><span>cleanmap<span className="brand-place">tripura</span></span></a><p>An independent concept prototype. Not an official government service.</p><a className="back-top" href="#top">Back to top ↑</a></footer>
     </div>
   );
 }

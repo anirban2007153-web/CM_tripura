@@ -1,6 +1,7 @@
 {
   "name": "CleanMap Tripura",
-  "description": "Independent civic complaint prototype for Tripura. It is not a government service and does not file official municipal complaints.",
+  "description": "A lightweight community concept website about local cleanliness in Tripura. Not an official government service.",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }
+
